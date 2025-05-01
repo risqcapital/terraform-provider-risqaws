@@ -52,7 +52,7 @@ resource "aws_ssm_document" "this" {
         name   = "Test",
         inputs = {
           runCommand = [
-            "echo Hello {{ name }} && sleep 1m && exit 0"
+            "echo Hello {{ name }} && sleep 10s && exit 0"
           ]
         }
       }
@@ -92,6 +92,7 @@ resource "risqaws_ssm_command" "this" {
 - `document_version` (String) The version of the SSM document to use.
 - `parameters` (Map of String) The parameters to pass to the SSM document.
 - `targets` (Block List) The list of targets to send the command to. (see [below for nested schema](#nestedblock--targets))
+- `timeouts` (Attributes) (see [below for nested schema](#nestedatt--timeouts))
 
 ### Read-Only
 
@@ -104,3 +105,11 @@ Required:
 
 - `key` (String) The key of the target.
 - `values` (List of String) The values of the target.
+
+
+<a id="nestedatt--timeouts"></a>
+### Nested Schema for `timeouts`
+
+Optional:
+
+- `create` (String) A string that can be [parsed as a duration](https://pkg.go.dev/time#ParseDuration) consisting of numbers and unit suffixes, such as "30s" or "2h45m". Valid time units are "s" (seconds), "m" (minutes), "h" (hours).
