@@ -203,7 +203,6 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 
 	// This should be unreachable code, but error handling is added for safety
 	resp.Diagnostics.AddError("Max Retries Reached", fmt.Sprintf("Max retries reached after %d attempts: %s", maxRetries, ""))
-	return
 }
 
 func PollCommandInvocation(ctx context.Context, client *ssm.Client, command *ssm.SendCommandOutput) diag.Diagnostics {
