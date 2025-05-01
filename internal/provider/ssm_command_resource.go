@@ -189,7 +189,7 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 				case <-time.After(retryDelay):
 					continue
 				case <-ctx.Done():
-					resp.Diagnostics.AddError("Operation Cancelled", fmt.Sprintf("Context cancelled during succeeded wait after attempt %d: %s", attempt+1, ctx.Err()))
+					resp.Diagnostics.AddError("Operation Cancelled", fmt.Sprintf("Context cancelled during wait after attempt %d: %s", attempt+1, ctx.Err()))
 					return
 				}
 			} else {
