@@ -1,3 +1,4 @@
+// Copyright (c) Risq Research Ltd.
 // Copyright (c) HashiCorp, Inc.
 // SPDX-License-Identifier: MPL-2.0
 
@@ -245,6 +246,10 @@ func PollCommandInvocation(ctx context.Context, client *ssm.Client, command *ssm
 					*plugin.Output,
 				)
 			}
+		}
+
+		if diagnostics.HasError() {
+			return diagnostics
 		}
 
 		if invocation.Status == ssmtypes.CommandInvocationStatusFailed || invocation.Status == ssmtypes.CommandInvocationStatusTimedOut || invocation.Status == ssmtypes.CommandInvocationStatusCancelled {
