@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
@@ -39,6 +40,7 @@ type SsmCommandResourceModel struct {
 	DocumentVersion types.String          `tfsdk:"document_version"`
 	Targets         []TargetResourceModel `tfsdk:"targets"`
 	Parameters      types.Map             `tfsdk:"parameters"`
+	Timeouts        timeouts.Value        `tfsdk:"timeouts"`
 }
 
 // TargetResourceModel describes the target block in the resource.
@@ -77,6 +79,9 @@ func (r *SsmCommandResource) Schema(ctx context.Context, req resource.SchemaRequ
 				Optional:            true,
 				ElementType:         types.StringType,
 			},
+			"timeouts": timeouts.Attributes(ctx, timeouts.Opts{
+				Create: true,
+			}),
 		},
 
 		Blocks: map[string]schema.Block{
@@ -167,10 +172,17 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 
 	data.Id = types.StringValue(*command.Command.CommandId)
 
-	maxRetries := 10
-	retryDelay := 500 * time.Millisecond
+	createTimeout, createTimeoutErr := data.Timeouts.Create(ctx, 5*time.Minute)
+	resp.Diagnostics.Append(createTimeoutErr...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
 
-	for attempt := 0; attempt < maxRetries; attempt++ {
+	ctx, cancel := context.WithTimeout(ctx, createTimeout)
+	defer cancel()
+
+	backoff := time.Second
+	for attempt := 0; ; attempt++ {
 		if ctx.Err() != nil {
 			resp.Diagnostics.AddError("Operation Cancelled", fmt.Sprintf("Context cancelled before attempt %d: %s", attempt+1, ctx.Err()))
 			return
@@ -183,17 +195,16 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 			resp.Diagnostics.Append(attemptDiag...)
 			return
 		} else if attemptDiag.WarningsCount() > 0 {
-			if attempt < maxRetries-1 {
-				tflog.Warn(ctx, fmt.Sprintf("Attempt %d failed with retriable error: %s. Retrying in %s...", attempt+1, attemptDiag, retryDelay))
-				select {
-				case <-time.After(retryDelay):
-					continue
-				case <-ctx.Done():
-					resp.Diagnostics.AddError("Operation Cancelled", fmt.Sprintf("Context cancelled during wait after attempt %d: %s", attempt+1, ctx.Err()))
-					return
+			tflog.Warn(ctx, fmt.Sprintf("Attempt %d failed with retriable error: %s. Retrying in %s...", attempt+1, attemptDiag, backoff))
+			select {
+			case <-time.After(backoff):
+				backoff *= 2
+				if backoff > 30*time.Second {
+					backoff = 30 * time.Second
 				}
-			} else {
-				resp.Diagnostics.AddError("Max Retries Reached", fmt.Sprintf("Max retries reached after %d attempts: %s", maxRetries, attemptDiag))
+				continue
+			case <-ctx.Done():
+				resp.Diagnostics.AddError("Operation Timed Out", fmt.Sprintf("Context cancelled during wait after attempt %d: %s", attempt+1, ctx.Err()))
 				return
 			}
 		} else {
@@ -203,7 +214,7 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 	}
 
 	// This should be unreachable code, but error handling is added for safety
-	resp.Diagnostics.AddError("Max Retries Reached", fmt.Sprintf("Max retries reached after %d attempts: %s", maxRetries, ""))
+	resp.Diagnostics.AddError("Unreachable", "This code should not be reached")
 }
 
 func PollCommandInvocation(ctx context.Context, client *ssm.Client, command *ssm.SendCommandOutput) diag.Diagnostics {
