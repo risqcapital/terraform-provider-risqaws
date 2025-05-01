@@ -5,16 +5,17 @@ package provider
 
 import (
 	"context"
-	json2 "encoding/json"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
+	"github.com/hashicorp/terraform-plugin-log/tflog"
 	"time"
 )
 
@@ -32,15 +33,15 @@ type SsmCommandResource struct {
 
 // SsmCommandResourceModel describes the resource data model.
 type SsmCommandResourceModel struct {
-	Id              types.String `tfsdk:"id"`
-	DocumentName    types.String `tfsdk:"document_name"`
-	DocumentVersion types.String `tfsdk:"document_version"`
-	Targets         []Target     `tfsdk:"targets"`
-	Parameters      types.Map    `tfsdk:"parameters"`
+	Id              types.String          `tfsdk:"id"`
+	DocumentName    types.String          `tfsdk:"document_name"`
+	DocumentVersion types.String          `tfsdk:"document_version"`
+	Targets         []TargetResourceModel `tfsdk:"targets"`
+	Parameters      types.Map             `tfsdk:"parameters"`
 }
 
-// Target describes the target block in the resource.
-type Target struct {
+// TargetResourceModel describes the target block in the resource.
+type TargetResourceModel struct {
 	Key    types.String   `tfsdk:"key"`
 	Values []types.String `tfsdk:"values"`
 }
@@ -153,9 +154,10 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 	}
 
 	command, err := r.ssm.SendCommand(ctx, &ssm.SendCommandInput{
-		DocumentName: data.DocumentName.ValueStringPointer(),
-		Targets:      targets,
-		Parameters:   parameters,
+		DocumentName:    data.DocumentName.ValueStringPointer(),
+		DocumentVersion: data.DocumentVersion.ValueStringPointer(),
+		Targets:         targets,
+		Parameters:      parameters,
 	})
 	if err != nil {
 		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to send command, got error: %s", err))
@@ -164,71 +166,95 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 
 	data.Id = types.StringValue(*command.Command.CommandId)
 
-OUTER:
-	for {
-		listCommandInvocationsOutput, err := r.ssm.ListCommandInvocations(ctx, &ssm.ListCommandInvocationsInput{
-			CommandId: command.Command.CommandId,
-			Details:   true,
-		})
-		if err != nil {
-			resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to ListCommandInvocations, got error: %s", err))
+	maxRetries := 10
+	retryDelay := 500 * time.Millisecond
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if ctx.Err() != nil {
+			resp.Diagnostics.AddError("Operation Cancelled", fmt.Sprintf("Context cancelled before attempt %d: %s", attempt+1, ctx.Err()))
 			return
 		}
 
-		invocationCount := int32(len(listCommandInvocationsOutput.CommandInvocations))
+		// Diagnostics with Severity warnings are treated as retriable errors
+		attemptDiag := PollCommandInvocation(ctx, r.ssm, command)
 
-		if invocationCount == 0 {
-			// TODO: Is this the right way to sleep before retrying?
-			time.Sleep(500 * time.Millisecond)
-			continue
-		}
-
-		for _, invocation := range listCommandInvocationsOutput.CommandInvocations {
-			if invocation.Status == ssmtypes.CommandInvocationStatusPending ||
-				invocation.Status == ssmtypes.CommandInvocationStatusInProgress ||
-				invocation.Status == ssmtypes.CommandInvocationStatusDelayed ||
-				invocation.Status == ssmtypes.CommandInvocationStatusCancelling {
-				// TODO: Is this the right way to sleep before retrying?
-				time.Sleep(500 * time.Millisecond)
-				continue OUTER
-			}
-
-			for _, plugin := range invocation.CommandPlugins {
-				if plugin.Status == ssmtypes.CommandPluginStatusSuccess {
+		if attemptDiag.HasError() {
+			resp.Diagnostics.Append(attemptDiag...)
+			return
+		} else if attemptDiag.WarningsCount() > 0 {
+			if attempt < maxRetries-1 {
+				tflog.Warn(ctx, fmt.Sprintf("Attempt %d failed with retriable error: %s. Retrying in %s...", attempt+1, attemptDiag, retryDelay))
+				select {
+				case <-time.After(retryDelay):
 					continue
-				} else {
-					resp.Diagnostics.AddError(
-						fmt.Sprintf("%s to execute SSM Command %s / %s / %s", *plugin.StatusDetails, *command.Command.CommandId, *invocation.InstanceId, *plugin.Name),
-						*plugin.Output,
-					)
+				case <-ctx.Done():
+					resp.Diagnostics.AddError("Operation Cancelled", fmt.Sprintf("Context cancelled during succeeded wait after attempt %d: %s", attempt+1, ctx.Err()))
+					return
 				}
+			} else {
+				resp.Diagnostics.AddError("Max Retries Reached", fmt.Sprintf("Max retries reached after %d attempts: %s", maxRetries, attemptDiag))
+				return
 			}
+		} else {
+			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+			return
+		}
+	}
 
-			if resp.Diagnostics.HasError() {
+	// This should be unreachable code, but error handling is added for safety
+	resp.Diagnostics.AddError("Max Retries Reached", fmt.Sprintf("Max retries reached after %d attempts: %s", maxRetries, ""))
+	return
+}
+
+func PollCommandInvocation(ctx context.Context, client *ssm.Client, command *ssm.SendCommandOutput) diag.Diagnostics {
+	// Severity = Error is treated as a fatal
+	// Severity = Warning is treated as a retriable error
+	diagnostics := diag.Diagnostics{}
+
+	listCommandInvocationsOutput, err := client.ListCommandInvocations(ctx, &ssm.ListCommandInvocationsInput{
+		CommandId: command.Command.CommandId,
+		Details:   true,
+	})
+	if err != nil {
+		diagnostics.AddError("AWS Client Error", fmt.Sprintf("Unable to ListCommandInvocations, got error: %s", err))
+		return diagnostics
+	}
+
+	invocationCount := int32(len(listCommandInvocationsOutput.CommandInvocations))
+	if invocationCount == 0 {
+		// Continue polling as the command invocation is not yet available and the api is eventually consistent
+		diagnostics.AddWarning("Command Invocations Not Found", fmt.Sprintf("No command invocations found for command ID: %s", *command.Command.CommandId))
+		return diagnostics
+	}
+
+	for _, invocation := range listCommandInvocationsOutput.CommandInvocations {
+		if invocation.Status == ssmtypes.CommandInvocationStatusPending ||
+			invocation.Status == ssmtypes.CommandInvocationStatusInProgress ||
+			invocation.Status == ssmtypes.CommandInvocationStatusDelayed ||
+			invocation.Status == ssmtypes.CommandInvocationStatusCancelling {
+			// Continue polling if the command is still in progress
+			diagnostics.AddWarning("Command Invocation In Progress", fmt.Sprintf("Command invocation is still in progress for command ID: %s, instance ID: %s", *command.Command.CommandId, *invocation.InstanceId))
+			return diagnostics
+		}
+
+		for _, plugin := range invocation.CommandPlugins {
+			if plugin.Status == ssmtypes.CommandPluginStatusSuccess {
 				continue
-			}
-
-			json, err := json2.Marshal(invocation)
-			if err != nil {
-				resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to marshal command invocation, got error: %s", err))
-				return
-			}
-
-			if invocation.Status == ssmtypes.CommandInvocationStatusFailed || invocation.Status == ssmtypes.CommandInvocationStatusTimedOut || invocation.Status == ssmtypes.CommandInvocationStatusCancelled {
-				resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Command invocation failed, got error: %s", json))
-				return
+			} else {
+				diagnostics.AddError(
+					fmt.Sprintf("%s to execute SSM Command %s / %s / %s", *plugin.StatusDetails, *command.Command.CommandId, *invocation.InstanceId, *plugin.Name),
+					*plugin.Output,
+				)
 			}
 		}
 
-		break
+		if invocation.Status == ssmtypes.CommandInvocationStatusFailed || invocation.Status == ssmtypes.CommandInvocationStatusTimedOut || invocation.Status == ssmtypes.CommandInvocationStatusCancelled {
+			diagnostics.AddError("Client Error", fmt.Sprintf("Command invocation failed, got error: %s", *invocation.StatusDetails))
+			return diagnostics
+		}
 	}
 
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	// Save data into Terraform state
-	resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
+	return diagnostics
 }
 
 func (r *SsmCommandResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {

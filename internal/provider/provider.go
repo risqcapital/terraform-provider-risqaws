@@ -37,9 +37,7 @@ func (p *RisqAwsProvider) Metadata(ctx context.Context, req provider.MetadataReq
 }
 
 func (p *RisqAwsProvider) Schema(ctx context.Context, req provider.SchemaRequest, resp *provider.SchemaResponse) {
-	resp.Schema = schema.Schema{
-		Attributes: map[string]schema.Attribute{},
-	}
+	resp.Schema = schema.Schema{}
 }
 
 func (p *RisqAwsProvider) Configure(ctx context.Context, req provider.ConfigureRequest, resp *provider.ConfigureResponse) {
