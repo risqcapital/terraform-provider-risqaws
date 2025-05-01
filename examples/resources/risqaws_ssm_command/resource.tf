@@ -37,7 +37,7 @@ resource "aws_ssm_document" "this" {
         name   = "Test",
         inputs = {
           runCommand = [
-            "echo Hello {{ name }} && exit 0"
+            "echo Hello {{ name }} && sleep 10s && exit 0"
           ]
         }
       }

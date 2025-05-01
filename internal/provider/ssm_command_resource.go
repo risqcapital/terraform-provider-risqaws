@@ -6,6 +6,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
@@ -198,23 +199,26 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 			tflog.Warn(ctx, fmt.Sprintf("Attempt %d failed with retriable error: %s. Retrying in %s...", attempt+1, attemptDiag, backoff))
 			select {
 			case <-time.After(backoff):
+				// Exponential backoff with a maximum of 30 seconds
 				backoff *= 2
 				if backoff > 30*time.Second {
 					backoff = 30 * time.Second
 				}
 				continue
 			case <-ctx.Done():
-				resp.Diagnostics.AddError("Operation Timed Out", fmt.Sprintf("Context cancelled during wait after attempt %d: %s", attempt+1, ctx.Err()))
-				return
+				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+					resp.Diagnostics.AddError("Timeout while waiting for SSM Command to complete", fmt.Sprintf("Timeout occured while waiting on command %s (polled %d times over %s)", *command.Command.CommandId, attempt+1, createTimeout))
+					return
+				} else {
+					resp.Diagnostics.AddError("Operation Cancelled", fmt.Sprintf("Context cancelled before attempt %d: %s", attempt+1, ctx.Err()))
+					return
+				}
 			}
 		} else {
 			resp.Diagnostics.Append(resp.State.Set(ctx, &data)...)
 			return
 		}
 	}
-
-	// This should be unreachable code, but error handling is added for safety
-	resp.Diagnostics.AddError("Unreachable", "This code should not be reached")
 }
 
 func PollCommandInvocation(ctx context.Context, client *ssm.Client, command *ssm.SendCommandOutput) diag.Diagnostics {
