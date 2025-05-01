@@ -207,7 +207,7 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 				continue
 			case <-ctx.Done():
 				if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-					resp.Diagnostics.AddError("Timeout while waiting for SSM Command to complete", fmt.Sprintf("Timeout occured while waiting on command %s (polled %d times over %s)", *command.Command.CommandId, attempt+1, createTimeout))
+					resp.Diagnostics.AddError("Timeout while waiting for SSM Command to complete", fmt.Sprintf("Timeout occurred while waiting on command %s (polled %d times over %s)", *command.Command.CommandId, attempt+1, createTimeout))
 					return
 				} else {
 					resp.Diagnostics.AddError("Operation Cancelled", fmt.Sprintf("Context cancelled before attempt %d: %s", attempt+1, ctx.Err()))
