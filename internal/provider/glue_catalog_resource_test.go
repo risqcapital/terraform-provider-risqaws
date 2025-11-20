@@ -40,7 +40,7 @@ func TestAccGlueCatalogResource_S3Tables(t *testing.T) {
 					resource.TestCheckResourceAttr(resourceName, "federated_catalog.connection_name", "aws:s3tables"),
 					resource.TestCheckResourceAttr(resourceName, "federated_catalog.connection_type", "aws:s3tables"),
 					resource.TestCheckResourceAttrSet(resourceName, "federated_catalog.identifier"),
-					resource.TestCheckResourceAttr(resourceName, "allow_full_table_external_data_access", "True"),
+					resource.TestCheckResourceAttr(resourceName, "allow_full_table_external_data_access", "true"),
 				),
 			},
 		},
@@ -58,7 +58,7 @@ resource "risqaws_glue_catalog" "test" {
   }
   create_table_default_permissions      = []
   create_database_default_permissions   = []
-  allow_full_table_external_data_access = "True"
+  allow_full_table_external_data_access = true
 }
 `, name, testAccRegion, testAccAccountID)
 }

@@ -42,7 +42,7 @@ type GlueCatalogResourceModel struct {
 	Parameters                       types.Map    `tfsdk:"parameters"`
 	FederatedCatalog                 types.Object `tfsdk:"federated_catalog"`
 	TargetRedshiftCatalog            types.Object `tfsdk:"target_redshift_catalog"`
-	AllowFullTableExternalDataAccess types.String `tfsdk:"allow_full_table_external_data_access"`
+	AllowFullTableExternalDataAccess types.Bool   `tfsdk:"allow_full_table_external_data_access"`
 	CreateDatabaseDefaultPermissions types.List   `tfsdk:"create_database_default_permissions"`
 	CreateTableDefaultPermissions    types.List   `tfsdk:"create_table_default_permissions"`
 	CatalogProperties                types.Object `tfsdk:"catalog_properties"`
@@ -139,8 +139,8 @@ func (r *GlueCatalogResource) Schema(ctx context.Context, req resource.SchemaReq
 				MarkdownDescription: "A description of the catalog.",
 				Optional:            true,
 			},
-			"allow_full_table_external_data_access": schema.StringAttribute{
-				MarkdownDescription: "Allows third-party engines to access data in Amazon S3 locations that are registered with Lake Formation. Valid values: 'True' or 'False'.",
+			"allow_full_table_external_data_access": schema.BoolAttribute{
+				MarkdownDescription: "Allows third-party engines to access data in Amazon S3 locations that are registered with Lake Formation. Valid values: `true` or `false`.",
 				Optional:            true,
 			},
 			"create_database_default_permissions": schema.ListNestedAttribute{
@@ -284,7 +284,10 @@ func (r *GlueCatalogResource) Create(ctx context.Context, req resource.CreateReq
 
 	// Handle AllowFullTableExternalDataAccess
 	if !data.AllowFullTableExternalDataAccess.IsNull() {
-		access := gluetypes.AllowFullTableExternalDataAccessEnum(data.AllowFullTableExternalDataAccess.ValueString())
+		access := gluetypes.AllowFullTableExternalDataAccessEnumFalse
+		if data.AllowFullTableExternalDataAccess.ValueBool() {
+			access = gluetypes.AllowFullTableExternalDataAccessEnumTrue
+		}
 		catalogInput.AllowFullTableExternalDataAccess = access
 	}
 
@@ -440,7 +443,10 @@ func (r *GlueCatalogResource) Update(ctx context.Context, req resource.UpdateReq
 
 	// Handle AllowFullTableExternalDataAccess
 	if !data.AllowFullTableExternalDataAccess.IsNull() {
-		access := gluetypes.AllowFullTableExternalDataAccessEnum(data.AllowFullTableExternalDataAccess.ValueString())
+		access := gluetypes.AllowFullTableExternalDataAccessEnumFalse
+		if data.AllowFullTableExternalDataAccess.ValueBool() {
+			access = gluetypes.AllowFullTableExternalDataAccessEnumTrue
+		}
 		catalogInput.AllowFullTableExternalDataAccess = access
 	}
 
