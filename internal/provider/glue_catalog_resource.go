@@ -30,7 +30,7 @@ func NewGlueCatalogResource() resource.Resource {
 
 // GlueCatalogResource defines the resource implementation.
 type GlueCatalogResource struct {
-	glue *glue.Client
+	config aws.Config
 }
 
 // GlueCatalogResourceModel describes the resource data model.
@@ -46,6 +46,7 @@ type GlueCatalogResourceModel struct {
 	CreateDatabaseDefaultPermissions types.List   `tfsdk:"create_database_default_permissions"`
 	CreateTableDefaultPermissions    types.List   `tfsdk:"create_table_default_permissions"`
 	CatalogProperties                types.Object `tfsdk:"catalog_properties"`
+	Region                           types.String `tfsdk:"region"`
 	ResourceArn                      types.String `tfsdk:"resource_arn"`
 }
 
@@ -200,6 +201,10 @@ func (r *GlueCatalogResource) Schema(ctx context.Context, req resource.SchemaReq
 					},
 				},
 			},
+			"region": schema.StringAttribute{
+				MarkdownDescription: "The AWS region where the catalog will be created. If not specified, the provider's default region will be used.",
+				Optional:            true,
+			},
 			"resource_arn": schema.StringAttribute{
 				MarkdownDescription: "The ARN of the catalog.",
 				Computed:            true,
@@ -225,8 +230,20 @@ func (r *GlueCatalogResource) Configure(ctx context.Context, req resource.Config
 		return
 	}
 
-	// Initialize the glue client
-	r.glue = glue.NewFromConfig(config)
+	// Store the config for later use
+	r.config = config
+}
+
+// getGlueClient returns a Glue client configured for the specified region.
+// If region is empty, it uses the default region from the config.
+func (r *GlueCatalogResource) getGlueClient(region string) *glue.Client {
+	if region != "" {
+		// Create a new config with the specified region
+		cfg := r.config.Copy()
+		cfg.Region = region
+		return glue.NewFromConfig(cfg)
+	}
+	return glue.NewFromConfig(r.config)
 }
 
 func (r *GlueCatalogResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
@@ -356,7 +373,9 @@ func (r *GlueCatalogResource) Create(ctx context.Context, req resource.CreateReq
 		"name": data.Name.ValueString(),
 	})
 
-	_, err := r.glue.CreateCatalog(ctx, createInput)
+	// Create the catalog
+	glueClient := r.getGlueClient(data.Region.ValueString())
+	_, err := glueClient.CreateCatalog(ctx, createInput)
 	if err != nil {
 		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to create Glue Catalog, got error: %s", err))
 		return
@@ -505,7 +524,9 @@ func (r *GlueCatalogResource) Update(ctx context.Context, req resource.UpdateReq
 		"name": data.Name.ValueString(),
 	})
 
-	_, err := r.glue.UpdateCatalog(ctx, updateInput)
+	// Update the catalog
+	glueClient := r.getGlueClient(data.Region.ValueString())
+	_, err := glueClient.UpdateCatalog(ctx, updateInput)
 	if err != nil {
 		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to update Glue Catalog, got error: %s", err))
 		return
@@ -533,7 +554,9 @@ func (r *GlueCatalogResource) Delete(ctx context.Context, req resource.DeleteReq
 		"name": data.Name.ValueString(),
 	})
 
-	_, err := r.glue.DeleteCatalog(ctx, &glue.DeleteCatalogInput{
+	// Delete the catalog
+	glueClient := r.getGlueClient(data.Region.ValueString())
+	_, err := glueClient.DeleteCatalog(ctx, &glue.DeleteCatalogInput{
 		CatalogId: data.Name.ValueStringPointer(),
 	})
 	if err != nil {
@@ -543,7 +566,8 @@ func (r *GlueCatalogResource) Delete(ctx context.Context, req resource.DeleteReq
 }
 
 func (r *GlueCatalogResource) readCatalog(ctx context.Context, data *GlueCatalogResourceModel, diagnostics *diag.Diagnostics) {
-	getCatalogOutput, err := r.glue.GetCatalog(ctx, &glue.GetCatalogInput{
+	glueClient := r.getGlueClient(data.Region.ValueString())
+	getCatalogOutput, err := glueClient.GetCatalog(ctx, &glue.GetCatalogInput{
 		CatalogId: data.Name.ValueStringPointer(),
 	})
 	if err != nil {

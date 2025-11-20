@@ -14,7 +14,6 @@ import (
 
 var (
 	testAccAccountID string
-	testAccRegion    string
 )
 
 func TestAccGlueCatalogResource(t *testing.T) {
@@ -27,16 +26,15 @@ func TestAccGlueCatalogResource_S3Tables(t *testing.T) {
 	rName := "s3tablescatalog"
 	resourceName := "risqaws_glue_catalog.test"
 
-	resourceConfig := testAccGlueCatalogResourceConfig_S3Tables(rName)
-	t.Logf("Resource under test: %s", resourceConfig)
 	resource.Test(t, resource.TestCase{
 		PreCheck:                 func() { testAccPreCheck(t) },
 		ProtoV6ProviderFactories: testAccProtoV6ProviderFactories,
 		Steps: []resource.TestStep{
 			{
-				Config: resourceConfig,
+				Config: testAccGlueCatalogResourceConfig_S3Tables(rName, "us-east-1"),
 				Check: resource.ComposeAggregateTestCheckFunc(
 					resource.TestCheckResourceAttr(resourceName, "name", rName),
+					resource.TestCheckResourceAttr(resourceName, "region", "us-east-1"),
 					resource.TestCheckResourceAttr(resourceName, "federated_catalog.connection_name", "aws:s3tables"),
 					resource.TestCheckResourceAttr(resourceName, "federated_catalog.connection_type", "aws:s3tables"),
 					resource.TestCheckResourceAttrSet(resourceName, "federated_catalog.identifier"),
@@ -47,10 +45,11 @@ func TestAccGlueCatalogResource_S3Tables(t *testing.T) {
 	})
 }
 
-func testAccGlueCatalogResourceConfig_S3Tables(name string) string {
+func testAccGlueCatalogResourceConfig_S3Tables(name, region string) string {
 	return fmt.Sprintf(`
 resource "risqaws_glue_catalog" "test" {
   name = %[1]q
+  region = %[2]q
   federated_catalog = {
     identifier      = "arn:aws:s3tables:%[2]s:%[3]s:bucket/*"
     connection_name = "aws:s3tables"
@@ -60,7 +59,7 @@ resource "risqaws_glue_catalog" "test" {
   create_database_default_permissions   = []
   allow_full_table_external_data_access = true
 }
-`, name, testAccRegion, testAccAccountID)
+`, name, region, testAccAccountID)
 }
 
 func testAccPreCheck(t *testing.T) {
@@ -83,30 +82,17 @@ func TestMain(m *testing.M) {
 }
 
 func initAwsConfig() {
-	// Load AWS config and get account ID and region
+	// Load AWS config and get account ID
 	ctx := context.Background()
 	cfg, err := config.LoadDefaultConfig(ctx)
 	if err != nil {
 		log.Fatalf("failed to load AWS config: %v", err)
 	}
 
-	// Get region from config
-	testAccRegion = cfg.Region
-	if testAccRegion == "" {
-		// Try to get from environment variable
-		testAccRegion = os.Getenv("AWS_REGION")
-		if testAccRegion == "" {
-			testAccRegion = os.Getenv("AWS_DEFAULT_REGION")
-		}
-		if testAccRegion == "" {
-			log.Fatal("AWS region not configured")
-		}
-	}
-
-	log.Printf("Using AWS region: %s\n", testAccRegion)
-
 	// Get account ID using STS
-	stsClient := sts.NewFromConfig(cfg)
+	stsClient := sts.NewFromConfig(cfg, func(options *sts.Options) {
+		options.Region = "us-east-1"
+	})
 	identity, err := stsClient.GetCallerIdentity(ctx, &sts.GetCallerIdentityInput{})
 	if err != nil {
 		log.Fatalf("failed to get caller identity: %v", err)
