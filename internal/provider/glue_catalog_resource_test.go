@@ -68,11 +68,21 @@ func testAccPreCheck(t *testing.T) {
 	if os.Getenv("TF_ACC") == "" {
 		t.Skip("TF_ACC not set, skipping acceptance test")
 	}
-
+	if os.Getenv("CI") != "" {
+		t.Skip("CI set, skipping acceptance test (not providing AWS credentials in CI)")
+	}
 }
 
 func TestMain(m *testing.M) {
-	// Write code here to run before tests
+	if os.Getenv("CI") == "" {
+		initAwsConfig()
+	}
+
+	exitVal := m.Run()
+	os.Exit(exitVal)
+}
+
+func initAwsConfig() {
 	// Load AWS config and get account ID and region
 	ctx := context.Background()
 	cfg, err := config.LoadDefaultConfig(ctx)
@@ -108,12 +118,4 @@ func TestMain(m *testing.M) {
 
 	testAccAccountID = *identity.Account
 	log.Printf("Using AWS account ID: %s\n", testAccAccountID)
-
-	// Run tests
-	exitVal := m.Run()
-
-	// Write code here to run after tests
-
-	// Exit with exit value from tests
-	os.Exit(exitVal)
 }
