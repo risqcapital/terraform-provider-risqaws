@@ -536,7 +536,6 @@ func (r *GlueCatalogResource) Delete(ctx context.Context, req resource.DeleteReq
 	}
 }
 
-// readCatalog is a helper function to read the catalog from AWS and populate the data model
 func (r *GlueCatalogResource) readCatalog(ctx context.Context, data *GlueCatalogResourceModel, diagnostics *diag.Diagnostics) {
 	getCatalogOutput, err := r.glue.GetCatalog(ctx, &glue.GetCatalogInput{
 		CatalogId: data.Name.ValueStringPointer(),
@@ -559,7 +558,6 @@ func (r *GlueCatalogResource) readCatalog(ctx context.Context, data *GlueCatalog
 
 }
 
-// convertPrincipalPermissionsToSDK converts PrincipalPermissionsModel to AWS SDK types
 func convertPrincipalPermissionsToSDK(ctx context.Context, permissions []PrincipalPermissionsModel, diagnostics *diag.Diagnostics) []gluetypes.PrincipalPermissions {
 	if len(permissions) == 0 {
 		return []gluetypes.PrincipalPermissions{}
@@ -569,7 +567,6 @@ func convertPrincipalPermissionsToSDK(ctx context.Context, permissions []Princip
 	for i, perm := range permissions {
 		pp := gluetypes.PrincipalPermissions{}
 
-		// Handle Principal
 		if !perm.Principal.IsNull() {
 			var principal DataLakePrincipalModel
 			diagnostics.Append(perm.Principal.As(ctx, &principal, basetypes.ObjectAsOptions{})...)
@@ -581,7 +578,6 @@ func convertPrincipalPermissionsToSDK(ctx context.Context, permissions []Princip
 			}
 		}
 
-		// Handle Permissions
 		if !perm.Permissions.IsNull() {
 			var perms []types.String
 			diagnostics.Append(perm.Permissions.ElementsAs(ctx, &perms, false)...)

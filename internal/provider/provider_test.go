@@ -5,19 +5,6 @@ import (
 	"github.com/hashicorp/terraform-plugin-go/tfprotov6"
 )
 
-const (
-	// providerConfig is a shared configuration to combine with the test configuration.
-	providerConfig = `
-provider "risqaws" {
-  region = "us-east-1"
-}
-
-provider "aws" {
-  region = "us-east-1"
-}
-`
-)
-
 var (
 	// testAccProtoV6ProviderFactories are used to instantiate a provider during
 	// acceptance testing. The factory function will be invoked for every Terraform

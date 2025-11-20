@@ -24,11 +24,9 @@ func TestAccGlueCatalogResource(t *testing.T) {
 }
 
 func TestAccGlueCatalogResource_S3Tables(t *testing.T) {
-	// rName := acctest.RandStringFromCharSet(10, acctest.CharSetAlphaNum)
 	rName := "s3tablescatalog"
 	resourceName := "risqaws_glue_catalog.test"
 
-	// testAccPreCheck(t)
 	resourceConfig := testAccGlueCatalogResourceConfig_S3Tables(rName)
 	t.Logf("Resource under test: %s", resourceConfig)
 	resource.Test(t, resource.TestCase{
@@ -47,15 +45,6 @@ func TestAccGlueCatalogResource_S3Tables(t *testing.T) {
 			},
 		},
 	})
-}
-
-func testAccGlueCatalogResourceConfig(name, description string) string {
-	return fmt.Sprintf(`
-resource "risqaws_glue_catalog" "test" {
-  name        = %[1]q
-  description = %[2]q
-}
-`, name, description)
 }
 
 func testAccGlueCatalogResourceConfig_S3Tables(name string) string {
