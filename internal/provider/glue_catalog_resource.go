@@ -246,24 +246,16 @@ func (r *GlueCatalogResource) getGlueClient(region string) *glue.Client {
 	return glue.NewFromConfig(r.config)
 }
 
-func (r *GlueCatalogResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
-	var data GlueCatalogResourceModel
-
-	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
-
-	if resp.Diagnostics.HasError() {
-		return
-	}
-
-	// Build the CatalogInput
+// buildCatalogInput constructs a CatalogInput from the resource model.
+func (r *GlueCatalogResource) buildCatalogInput(ctx context.Context, data *GlueCatalogResourceModel, diagnostics *diag.Diagnostics) *gluetypes.CatalogInput {
 	catalogInput := &gluetypes.CatalogInput{}
 
 	// Handle TargetRedshiftCatalog
 	if !data.TargetRedshiftCatalog.IsNull() {
 		var targetRedshift TargetRedshiftCatalogModel
-		resp.Diagnostics.Append(data.TargetRedshiftCatalog.As(ctx, &targetRedshift, basetypes.ObjectAsOptions{})...)
-		if resp.Diagnostics.HasError() {
-			return
+		diagnostics.Append(data.TargetRedshiftCatalog.As(ctx, &targetRedshift, basetypes.ObjectAsOptions{})...)
+		if diagnostics.HasError() {
+			return nil
 		}
 		catalogInput.TargetRedshiftCatalog = &gluetypes.TargetRedshiftCatalog{
 			CatalogArn: targetRedshift.CatalogArn.ValueStringPointer(),
@@ -273,9 +265,9 @@ func (r *GlueCatalogResource) Create(ctx context.Context, req resource.CreateReq
 	// Handle FederatedCatalog
 	if !data.FederatedCatalog.IsNull() {
 		var federated FederatedCatalogModel
-		resp.Diagnostics.Append(data.FederatedCatalog.As(ctx, &federated, basetypes.ObjectAsOptions{})...)
-		if resp.Diagnostics.HasError() {
-			return
+		diagnostics.Append(data.FederatedCatalog.As(ctx, &federated, basetypes.ObjectAsOptions{})...)
+		if diagnostics.HasError() {
+			return nil
 		}
 		catalogInput.FederatedCatalog = &gluetypes.FederatedCatalog{
 			ConnectionName: federated.ConnectionName.ValueStringPointer(),
@@ -287,9 +279,9 @@ func (r *GlueCatalogResource) Create(ctx context.Context, req resource.CreateReq
 	// Handle Parameters
 	if !data.Parameters.IsNull() {
 		parameters := make(map[string]string)
-		resp.Diagnostics.Append(data.Parameters.ElementsAs(ctx, &parameters, false)...)
-		if resp.Diagnostics.HasError() {
-			return
+		diagnostics.Append(data.Parameters.ElementsAs(ctx, &parameters, false)...)
+		if diagnostics.HasError() {
+			return nil
 		}
 		catalogInput.Parameters = parameters
 	}
@@ -311,46 +303,64 @@ func (r *GlueCatalogResource) Create(ctx context.Context, req resource.CreateReq
 	// Handle CreateDatabaseDefaultPermissions
 	if !data.CreateDatabaseDefaultPermissions.IsNull() {
 		var dbPermissions []PrincipalPermissionsModel
-		resp.Diagnostics.Append(data.CreateDatabaseDefaultPermissions.ElementsAs(ctx, &dbPermissions, false)...)
-		if resp.Diagnostics.HasError() {
-			return
+		diagnostics.Append(data.CreateDatabaseDefaultPermissions.ElementsAs(ctx, &dbPermissions, false)...)
+		if diagnostics.HasError() {
+			return nil
 		}
-		catalogInput.CreateDatabaseDefaultPermissions = convertPrincipalPermissionsToSDK(ctx, dbPermissions, &resp.Diagnostics)
-		if resp.Diagnostics.HasError() {
-			return
+		catalogInput.CreateDatabaseDefaultPermissions = convertPrincipalPermissionsToSDK(ctx, dbPermissions, diagnostics)
+		if diagnostics.HasError() {
+			return nil
 		}
 	}
 
 	// Handle CreateTableDefaultPermissions
 	if !data.CreateTableDefaultPermissions.IsNull() {
 		var tablePermissions []PrincipalPermissionsModel
-		resp.Diagnostics.Append(data.CreateTableDefaultPermissions.ElementsAs(ctx, &tablePermissions, false)...)
-		if resp.Diagnostics.HasError() {
-			return
+		diagnostics.Append(data.CreateTableDefaultPermissions.ElementsAs(ctx, &tablePermissions, false)...)
+		if diagnostics.HasError() {
+			return nil
 		}
-		catalogInput.CreateTableDefaultPermissions = convertPrincipalPermissionsToSDK(ctx, tablePermissions, &resp.Diagnostics)
-		if resp.Diagnostics.HasError() {
-			return
+		catalogInput.CreateTableDefaultPermissions = convertPrincipalPermissionsToSDK(ctx, tablePermissions, diagnostics)
+		if diagnostics.HasError() {
+			return nil
 		}
 	}
 
 	// Handle CatalogProperties
 	if !data.CatalogProperties.IsNull() {
 		var catalogProps CatalogPropertiesModel
-		resp.Diagnostics.Append(data.CatalogProperties.As(ctx, &catalogProps, basetypes.ObjectAsOptions{})...)
-		if resp.Diagnostics.HasError() {
-			return
+		diagnostics.Append(data.CatalogProperties.As(ctx, &catalogProps, basetypes.ObjectAsOptions{})...)
+		if diagnostics.HasError() {
+			return nil
 		}
 		if !catalogProps.CustomProperties.IsNull() {
 			customProps := make(map[string]string)
-			resp.Diagnostics.Append(catalogProps.CustomProperties.ElementsAs(ctx, &customProps, false)...)
-			if resp.Diagnostics.HasError() {
-				return
+			diagnostics.Append(catalogProps.CustomProperties.ElementsAs(ctx, &customProps, false)...)
+			if diagnostics.HasError() {
+				return nil
 			}
 			catalogInput.CatalogProperties = &gluetypes.CatalogProperties{
 				CustomProperties: customProps,
 			}
 		}
+	}
+
+	return catalogInput
+}
+
+func (r *GlueCatalogResource) Create(ctx context.Context, req resource.CreateRequest, resp *resource.CreateResponse) {
+	var data GlueCatalogResourceModel
+
+	resp.Diagnostics.Append(req.Plan.Get(ctx, &data)...)
+
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	// Build the CatalogInput
+	catalogInput := r.buildCatalogInput(ctx, &data, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	// Prepare tags
@@ -417,101 +427,9 @@ func (r *GlueCatalogResource) Update(ctx context.Context, req resource.UpdateReq
 	}
 
 	// Build the CatalogInput
-	catalogInput := &gluetypes.CatalogInput{}
-
-	// Handle TargetRedshiftCatalog
-	if !data.TargetRedshiftCatalog.IsNull() {
-		var targetRedshift TargetRedshiftCatalogModel
-		resp.Diagnostics.Append(data.TargetRedshiftCatalog.As(ctx, &targetRedshift, basetypes.ObjectAsOptions{})...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		catalogInput.TargetRedshiftCatalog = &gluetypes.TargetRedshiftCatalog{
-			CatalogArn: targetRedshift.CatalogArn.ValueStringPointer(),
-		}
-	}
-
-	// Handle FederatedCatalog
-	if !data.FederatedCatalog.IsNull() {
-		var federated FederatedCatalogModel
-		resp.Diagnostics.Append(data.FederatedCatalog.As(ctx, &federated, basetypes.ObjectAsOptions{})...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		catalogInput.FederatedCatalog = &gluetypes.FederatedCatalog{
-			ConnectionName: federated.ConnectionName.ValueStringPointer(),
-			ConnectionType: federated.ConnectionType.ValueStringPointer(),
-			Identifier:     federated.Identifier.ValueStringPointer(),
-		}
-	}
-
-	// Handle Parameters
-	if !data.Parameters.IsNull() {
-		parameters := make(map[string]string)
-		resp.Diagnostics.Append(data.Parameters.ElementsAs(ctx, &parameters, false)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		catalogInput.Parameters = parameters
-	}
-
-	// Handle Description
-	if !data.Description.IsNull() {
-		catalogInput.Description = data.Description.ValueStringPointer()
-	}
-
-	// Handle AllowFullTableExternalDataAccess
-	if !data.AllowFullTableExternalDataAccess.IsNull() {
-		access := gluetypes.AllowFullTableExternalDataAccessEnumFalse
-		if data.AllowFullTableExternalDataAccess.ValueBool() {
-			access = gluetypes.AllowFullTableExternalDataAccessEnumTrue
-		}
-		catalogInput.AllowFullTableExternalDataAccess = access
-	}
-
-	// Handle CreateDatabaseDefaultPermissions
-	if !data.CreateDatabaseDefaultPermissions.IsNull() {
-		var dbPermissions []PrincipalPermissionsModel
-		resp.Diagnostics.Append(data.CreateDatabaseDefaultPermissions.ElementsAs(ctx, &dbPermissions, false)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		catalogInput.CreateDatabaseDefaultPermissions = convertPrincipalPermissionsToSDK(ctx, dbPermissions, &resp.Diagnostics)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-	}
-
-	// Handle CreateTableDefaultPermissions
-	if !data.CreateTableDefaultPermissions.IsNull() {
-		var tablePermissions []PrincipalPermissionsModel
-		resp.Diagnostics.Append(data.CreateTableDefaultPermissions.ElementsAs(ctx, &tablePermissions, false)...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		catalogInput.CreateTableDefaultPermissions = convertPrincipalPermissionsToSDK(ctx, tablePermissions, &resp.Diagnostics)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-	}
-
-	// Handle CatalogProperties
-	if !data.CatalogProperties.IsNull() {
-		var catalogProps CatalogPropertiesModel
-		resp.Diagnostics.Append(data.CatalogProperties.As(ctx, &catalogProps, basetypes.ObjectAsOptions{})...)
-		if resp.Diagnostics.HasError() {
-			return
-		}
-		if !catalogProps.CustomProperties.IsNull() {
-			customProps := make(map[string]string)
-			resp.Diagnostics.Append(catalogProps.CustomProperties.ElementsAs(ctx, &customProps, false)...)
-			if resp.Diagnostics.HasError() {
-				return
-			}
-			catalogInput.CatalogProperties = &gluetypes.CatalogProperties{
-				CustomProperties: customProps,
-			}
-		}
+	catalogInput := r.buildCatalogInput(ctx, &data, &resp.Diagnostics)
+	if resp.Diagnostics.HasError() {
+		return
 	}
 
 	// Update the catalog
