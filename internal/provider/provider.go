@@ -7,6 +7,7 @@ package provider
 import (
 	"context"
 	"fmt"
+
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/hashicorp/terraform-plugin-framework/datasource"
 	"github.com/hashicorp/terraform-plugin-framework/ephemeral"
@@ -66,6 +67,7 @@ func (p *RisqAwsProvider) Configure(ctx context.Context, req provider.ConfigureR
 func (p *RisqAwsProvider) Resources(ctx context.Context) []func() resource.Resource {
 	return []func() resource.Resource{
 		NewSsmCommandResource,
+		NewGlueCatalogResource,
 	}
 }
 
