@@ -8,9 +8,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
+	"sync"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
 	ssmtypes "github.com/aws/aws-sdk-go-v2/service/ssm/types"
+	"github.com/aws/smithy-go"
 	"github.com/hashicorp/terraform-plugin-framework-timeouts/resource/timeouts"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
@@ -19,11 +25,22 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/types"
 	"github.com/hashicorp/terraform-plugin-log/tflog"
-	"time"
 )
 
 // Ensure provider defined types fully satisfy framework interfaces.
 var _ resource.Resource = &SsmCommandResource{}
+
+var (
+	initialRetryBackoff = time.Second
+	maxRetryBackoff     = 30 * time.Second
+	backoffSettingsMu   sync.Mutex
+)
+
+type ssmAPI interface {
+	SendCommand(ctx context.Context, params *ssm.SendCommandInput, optFns ...func(*ssm.Options)) (*ssm.SendCommandOutput, error)
+	ListCommandInvocations(ctx context.Context, params *ssm.ListCommandInvocationsInput, optFns ...func(*ssm.Options)) (*ssm.ListCommandInvocationsOutput, error)
+	DescribeInstanceInformation(ctx context.Context, params *ssm.DescribeInstanceInformationInput, optFns ...func(*ssm.Options)) (*ssm.DescribeInstanceInformationOutput, error)
+}
 
 func NewSsmCommandResource() resource.Resource {
 	return &SsmCommandResource{}
@@ -31,7 +48,7 @@ func NewSsmCommandResource() resource.Resource {
 
 // SsmCommandResource defines the resource implementation.
 type SsmCommandResource struct {
-	ssm *ssm.Client
+	ssm ssmAPI
 }
 
 // SsmCommandResourceModel describes the resource data model.
@@ -160,19 +177,6 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 		}
 	}
 
-	command, err := r.ssm.SendCommand(ctx, &ssm.SendCommandInput{
-		DocumentName:    data.DocumentName.ValueStringPointer(),
-		DocumentVersion: data.DocumentVersion.ValueStringPointer(),
-		Targets:         targets,
-		Parameters:      parameters,
-	})
-	if err != nil {
-		resp.Diagnostics.AddError("Client Error", fmt.Sprintf("Unable to send command, got error: %s", err))
-		return
-	}
-
-	data.Id = types.StringValue(*command.Command.CommandId)
-
 	createTimeout, createTimeoutErr := data.Timeouts.Create(ctx, 5*time.Minute)
 	resp.Diagnostics.Append(createTimeoutErr...)
 	if resp.Diagnostics.HasError() {
@@ -181,6 +185,26 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 
 	ctx, cancel := context.WithTimeout(ctx, createTimeout)
 	defer cancel()
+
+	targetInstanceIDs := collectTargetInstanceIDs(targets)
+	readinessDiag := waitForSSMInstanceReadiness(ctx, r.ssm, targetInstanceIDs)
+	resp.Diagnostics.Append(readinessDiag...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	command, sendCommandDiag := sendCommandWithRetry(ctx, r.ssm, &ssm.SendCommandInput{
+		DocumentName:    data.DocumentName.ValueStringPointer(),
+		DocumentVersion: data.DocumentVersion.ValueStringPointer(),
+		Targets:         targets,
+		Parameters:      parameters,
+	}, data.DocumentName.ValueString(), targetInstanceIDs)
+	resp.Diagnostics.Append(sendCommandDiag...)
+	if resp.Diagnostics.HasError() {
+		return
+	}
+
+	data.Id = types.StringValue(*command.Command.CommandId)
 
 	backoff := time.Second
 	for attempt := 0; ; attempt++ {
@@ -221,7 +245,220 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 	}
 }
 
-func PollCommandInvocation(ctx context.Context, client *ssm.Client, command *ssm.SendCommandOutput) diag.Diagnostics {
+func sendCommandWithRetry(ctx context.Context, client ssmAPI, input *ssm.SendCommandInput, documentName string, targetInstanceIDs []string) (*ssm.SendCommandOutput, diag.Diagnostics) {
+	diagnostics := diag.Diagnostics{}
+	backoff := initialRetryBackoffValue()
+	if backoff <= 0 {
+		backoff = time.Second
+	}
+
+	for attempt := 0; ; attempt++ {
+		command, err := client.SendCommand(ctx, input)
+		if err == nil {
+			return command, diagnostics
+		}
+
+		if !isRetriableSendCommandReadinessError(err) {
+			diagnostics.AddError("Client Error", fmt.Sprintf("Unable to send command, got error: %s", err))
+			return nil, diagnostics
+		}
+
+		targetsLogValue := "none"
+		if len(targetInstanceIDs) > 0 {
+			targetsLogValue = strings.Join(targetInstanceIDs, ", ")
+		}
+		tflog.Warn(ctx, fmt.Sprintf("SendCommand attempt %d failed due to target readiness (%s). Retrying in %s. document=%q targets=%s", attempt+1, err, backoff, documentName, targetsLogValue))
+
+		select {
+		case <-time.After(backoff):
+			backoff = nextBackoff(backoff)
+		case <-ctx.Done():
+			diagnostics.AddError(
+				"SendCommand target readiness retries exhausted",
+				fmt.Sprintf("Timed out retrying SendCommand due to target readiness for document %q and targets [%s]: %s", documentName, strings.Join(targetInstanceIDs, ", "), ctx.Err()),
+			)
+			return nil, diagnostics
+		}
+	}
+}
+
+func waitForSSMInstanceReadiness(ctx context.Context, client ssmAPI, instanceIDs []string) diag.Diagnostics {
+	diagnostics := diag.Diagnostics{}
+	if len(instanceIDs) == 0 {
+		return diagnostics
+	}
+
+	backoff := initialRetryBackoffValue()
+	if backoff <= 0 {
+		backoff = time.Second
+	}
+
+	for attempt := 0; ; attempt++ {
+		statusByInstance, err := describeInstancePingStatuses(ctx, client, instanceIDs)
+		if err != nil {
+			diagnostics.AddError("Readiness Poll AWS Error", fmt.Sprintf("Unable to DescribeInstanceInformation while waiting for SSM target readiness: %s", err))
+			return diagnostics
+		}
+
+		notReady := unresolvedReadinessStatuses(instanceIDs, statusByInstance)
+		if len(notReady) == 0 {
+			return diagnostics
+		}
+
+		tflog.Warn(ctx, fmt.Sprintf("SSM target readiness attempt %d still waiting on [%s]. Retrying in %s", attempt+1, strings.Join(notReady, ", "), backoff))
+		select {
+		case <-time.After(backoff):
+			backoff = nextBackoff(backoff)
+		case <-ctx.Done():
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				diagnostics.AddError(
+					"Readiness Timeout",
+					fmt.Sprintf("Timed out waiting for target instances to become SSM managed and online: [%s]", strings.Join(notReady, ", ")),
+				)
+			} else {
+				diagnostics.AddError(
+					"Operation Cancelled",
+					fmt.Sprintf("Context cancelled while waiting for SSM target instance readiness: %s", ctx.Err()),
+				)
+			}
+			return diagnostics
+		}
+	}
+}
+
+func describeInstancePingStatuses(ctx context.Context, client ssmAPI, instanceIDs []string) (map[string]ssmtypes.PingStatus, error) {
+	const maxFilterValues = 50
+	statusByInstance := map[string]ssmtypes.PingStatus{}
+
+	for start := 0; start < len(instanceIDs); start += maxFilterValues {
+		end := start + maxFilterValues
+		if end > len(instanceIDs) {
+			end = len(instanceIDs)
+		}
+		chunk := instanceIDs[start:end]
+
+		output, err := client.DescribeInstanceInformation(ctx, &ssm.DescribeInstanceInformationInput{
+			Filters: []ssmtypes.InstanceInformationStringFilter{
+				{
+					Key:    aws.String("InstanceIds"),
+					Values: chunk,
+				},
+			},
+		})
+		if err != nil {
+			return nil, err
+		}
+
+		for _, instanceInfo := range output.InstanceInformationList {
+			if instanceInfo.InstanceId == nil {
+				continue
+			}
+
+			statusByInstance[*instanceInfo.InstanceId] = instanceInfo.PingStatus
+		}
+	}
+
+	return statusByInstance, nil
+}
+
+func unresolvedReadinessStatuses(targetInstanceIDs []string, statusByInstance map[string]ssmtypes.PingStatus) []string {
+	notReady := make([]string, 0, len(targetInstanceIDs))
+	for _, instanceID := range targetInstanceIDs {
+		status, ok := statusByInstance[instanceID]
+		if !ok {
+			notReady = append(notReady, fmt.Sprintf("%s:not-managed", instanceID))
+			continue
+		}
+
+		if status != ssmtypes.PingStatusOnline {
+			notReady = append(notReady, fmt.Sprintf("%s:%s", instanceID, status))
+		}
+	}
+
+	slices.Sort(notReady)
+	return notReady
+}
+
+func collectTargetInstanceIDs(targets []ssmtypes.Target) []string {
+	ids := map[string]struct{}{}
+	for _, target := range targets {
+		if target.Key == nil || !strings.EqualFold(*target.Key, "InstanceIds") {
+			continue
+		}
+
+		for _, value := range target.Values {
+			trimmed := strings.TrimSpace(value)
+			if trimmed == "" {
+				continue
+			}
+			ids[trimmed] = struct{}{}
+		}
+	}
+
+	if len(ids) == 0 {
+		return nil
+	}
+
+	instanceIDs := make([]string, 0, len(ids))
+	for instanceID := range ids {
+		instanceIDs = append(instanceIDs, instanceID)
+	}
+	slices.Sort(instanceIDs)
+	return instanceIDs
+}
+
+func isRetriableSendCommandReadinessError(err error) bool {
+	lowerMessage := strings.ToLower(err.Error())
+
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		code := strings.ToLower(apiErr.ErrorCode())
+		message := strings.ToLower(apiErr.ErrorMessage())
+		if code == "invalidinstanceid" && (containsReadinessMarker(message) || containsReadinessMarker(lowerMessage)) {
+			return true
+		}
+	}
+
+	return containsReadinessMarker(lowerMessage)
+}
+
+func containsReadinessMarker(message string) bool {
+	markers := []string{
+		"no instances in target list are managed instances",
+		"not in valid state for account",
+		"is not in valid state",
+		"unable to find managed instance",
+		"is not connected",
+		"is not valid for account",
+	}
+
+	for _, marker := range markers {
+		if strings.Contains(message, marker) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func initialRetryBackoffValue() time.Duration {
+	backoffSettingsMu.Lock()
+	defer backoffSettingsMu.Unlock()
+	return initialRetryBackoff
+}
+
+func nextBackoff(current time.Duration) time.Duration {
+	backoffSettingsMu.Lock()
+	defer backoffSettingsMu.Unlock()
+
+	next := current * 2
+	if next > maxRetryBackoff {
+		return maxRetryBackoff
+	}
+	return next
+}
+
+func PollCommandInvocation(ctx context.Context, client ssmAPI, command *ssm.SendCommandOutput) diag.Diagnostics {
 	// Severity = Error is treated as a fatal
 	// Severity = Warning is treated as a retriable error
 	diagnostics := diag.Diagnostics{}
