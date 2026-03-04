@@ -13,7 +13,7 @@ import (
 )
 
 func TestWaitForSSMInstanceReadinessImmediateOnline(t *testing.T) {
-	setRetryBackoffForTest(t, 1*time.Millisecond, 2*time.Millisecond)
+	setRetryBackoffForTest(t)
 
 	client := &fakeSSMClient{
 		describeOutputs: []*ssm.DescribeInstanceInformationOutput{
@@ -41,7 +41,7 @@ func TestWaitForSSMInstanceReadinessImmediateOnline(t *testing.T) {
 }
 
 func TestWaitForSSMInstanceReadinessRetriesUntilOnline(t *testing.T) {
-	setRetryBackoffForTest(t, 1*time.Millisecond, 2*time.Millisecond)
+	setRetryBackoffForTest(t)
 
 	client := &fakeSSMClient{
 		describeOutputs: []*ssm.DescribeInstanceInformationOutput{
@@ -77,7 +77,7 @@ func TestWaitForSSMInstanceReadinessRetriesUntilOnline(t *testing.T) {
 }
 
 func TestWaitForSSMInstanceReadinessTimeout(t *testing.T) {
-	setRetryBackoffForTest(t, 1*time.Millisecond, 2*time.Millisecond)
+	setRetryBackoffForTest(t)
 
 	client := &fakeSSMClient{
 		describeOutputs: []*ssm.DescribeInstanceInformationOutput{
@@ -97,7 +97,7 @@ func TestWaitForSSMInstanceReadinessTimeout(t *testing.T) {
 }
 
 func TestSendCommandWithRetryTransientThenSuccess(t *testing.T) {
-	setRetryBackoffForTest(t, 1*time.Millisecond, 2*time.Millisecond)
+	setRetryBackoffForTest(t)
 
 	client := &fakeSSMClient{
 		sendErrs: []error{
@@ -131,7 +131,7 @@ func TestSendCommandWithRetryTransientThenSuccess(t *testing.T) {
 }
 
 func TestSendCommandWithRetryNonRetriableError(t *testing.T) {
-	setRetryBackoffForTest(t, 1*time.Millisecond, 2*time.Millisecond)
+	setRetryBackoffForTest(t)
 
 	client := &fakeSSMClient{
 		sendErrs: []error{
@@ -195,14 +195,14 @@ func TestIsRetriableSendCommandReadinessError(t *testing.T) {
 	}
 }
 
-func setRetryBackoffForTest(t *testing.T, initial time.Duration, max time.Duration) {
+func setRetryBackoffForTest(t *testing.T) {
 	t.Helper()
 
 	backoffSettingsMu.Lock()
 	originalInitial := initialRetryBackoff
 	originalMax := maxRetryBackoff
-	initialRetryBackoff = initial
-	maxRetryBackoff = max
+	initialRetryBackoff = 1 * time.Millisecond
+	maxRetryBackoff = 2 * time.Millisecond
 	backoffSettingsMu.Unlock()
 
 	t.Cleanup(func() {
