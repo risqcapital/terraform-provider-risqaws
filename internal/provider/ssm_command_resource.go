@@ -246,80 +246,127 @@ func (r *SsmCommandResource) Create(ctx context.Context, req resource.CreateRequ
 }
 
 func sendCommandWithRetry(ctx context.Context, client ssmAPI, input *ssm.SendCommandInput, documentName string, targetInstanceIDs []string) (*ssm.SendCommandOutput, diag.Diagnostics) {
-	diagnostics := diag.Diagnostics{}
-	backoff := initialRetryBackoffValue()
-	if backoff <= 0 {
-		backoff = time.Second
+	var command *ssm.SendCommandOutput
+	var lastRetriableErr error
+	targetsLogValue := "none"
+	if len(targetInstanceIDs) > 0 {
+		targetsLogValue = strings.Join(targetInstanceIDs, ", ")
 	}
 
-	for attempt := 0; ; attempt++ {
-		command, err := client.SendCommand(ctx, input)
-		if err == nil {
-			return command, diagnostics
-		}
+	diagnostics := retryWithExponentialBackoff(
+		ctx,
+		func(_ int) (bool, diag.Diagnostics) {
+			attemptDiagnostics := diag.Diagnostics{}
 
-		if !isRetriableSendCommandReadinessError(err) {
-			diagnostics.AddError("Client Error", fmt.Sprintf("Unable to send command, got error: %s", err))
-			return nil, diagnostics
-		}
+			sentCommand, err := client.SendCommand(ctx, input)
+			if err == nil {
+				command = sentCommand
+				return false, attemptDiagnostics
+			}
 
-		targetsLogValue := "none"
-		if len(targetInstanceIDs) > 0 {
-			targetsLogValue = strings.Join(targetInstanceIDs, ", ")
-		}
-		tflog.Warn(ctx, fmt.Sprintf("SendCommand attempt %d failed due to target readiness (%s). Retrying in %s. document=%q targets=%s", attempt+1, err, backoff, documentName, targetsLogValue))
+			if !isRetriableSendCommandReadinessError(err) {
+				attemptDiagnostics.AddError("Client Error", fmt.Sprintf("Unable to send command, got error: %s", err))
+				return false, attemptDiagnostics
+			}
 
-		select {
-		case <-time.After(backoff):
-			backoff = nextBackoff(backoff)
-		case <-ctx.Done():
-			diagnostics.AddError(
+			lastRetriableErr = err
+			return true, attemptDiagnostics
+		},
+		func(attempt int, backoff time.Duration) {
+			tflog.Warn(ctx, fmt.Sprintf("SendCommand attempt %d failed due to target readiness (%s). Retrying in %s. document=%q targets=%s", attempt+1, lastRetriableErr, backoff, documentName, targetsLogValue))
+		},
+		func() diag.Diagnostics {
+			contextDiagnostics := diag.Diagnostics{}
+			contextDiagnostics.AddError(
 				"SendCommand target readiness retries exhausted",
 				fmt.Sprintf("Timed out retrying SendCommand due to target readiness for document %q and targets [%s]: %s", documentName, strings.Join(targetInstanceIDs, ", "), ctx.Err()),
 			)
-			return nil, diagnostics
-		}
+			return contextDiagnostics
+		},
+	)
+
+	if diagnostics.HasError() {
+		return nil, diagnostics
 	}
+
+	return command, diagnostics
 }
 
 func waitForSSMInstanceReadiness(ctx context.Context, client ssmAPI, instanceIDs []string) diag.Diagnostics {
-	diagnostics := diag.Diagnostics{}
 	if len(instanceIDs) == 0 {
-		return diagnostics
+		return diag.Diagnostics{}
 	}
 
-	backoff := initialRetryBackoffValue()
-	if backoff <= 0 {
-		backoff = time.Second
-	}
+	var notReady []string
+	return retryWithExponentialBackoff(
+		ctx,
+		func(_ int) (bool, diag.Diagnostics) {
+			attemptDiagnostics := diag.Diagnostics{}
 
-	for attempt := 0; ; attempt++ {
-		statusByInstance, err := describeInstancePingStatuses(ctx, client, instanceIDs)
-		if err != nil {
-			diagnostics.AddError("Readiness Poll AWS Error", fmt.Sprintf("Unable to DescribeInstanceInformation while waiting for SSM target readiness: %s", err))
-			return diagnostics
-		}
+			statusByInstance, err := describeInstancePingStatuses(ctx, client, instanceIDs)
+			if err != nil {
+				attemptDiagnostics.AddError("Readiness Poll AWS Error", fmt.Sprintf("Unable to DescribeInstanceInformation while waiting for SSM target readiness: %s", err))
+				return false, attemptDiagnostics
+			}
 
-		notReady := unresolvedReadinessStatuses(instanceIDs, statusByInstance)
-		if len(notReady) == 0 {
-			return diagnostics
-		}
+			notReady = unresolvedReadinessStatuses(instanceIDs, statusByInstance)
+			if len(notReady) == 0 {
+				return false, attemptDiagnostics
+			}
 
-		tflog.Warn(ctx, fmt.Sprintf("SSM target readiness attempt %d still waiting on [%s]. Retrying in %s", attempt+1, strings.Join(notReady, ", "), backoff))
-		select {
-		case <-time.After(backoff):
-			backoff = nextBackoff(backoff)
-		case <-ctx.Done():
+			return true, attemptDiagnostics
+		},
+		func(attempt int, backoff time.Duration) {
+			tflog.Warn(ctx, fmt.Sprintf("SSM target readiness attempt %d still waiting on [%s]. Retrying in %s", attempt+1, strings.Join(notReady, ", "), backoff))
+		},
+		func() diag.Diagnostics {
+			contextDiagnostics := diag.Diagnostics{}
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				diagnostics.AddError(
+				contextDiagnostics.AddError(
 					"Readiness Timeout",
 					fmt.Sprintf("Timed out waiting for target instances to become SSM managed and online: [%s]", strings.Join(notReady, ", ")),
 				)
 			} else {
-				diagnostics.AddError(
+				contextDiagnostics.AddError(
 					"Operation Cancelled",
 					fmt.Sprintf("Context cancelled while waiting for SSM target instance readiness: %s", ctx.Err()),
 				)
+			}
+
+			return contextDiagnostics
+		},
+	)
+}
+
+func retryWithExponentialBackoff(
+	ctx context.Context,
+	operation func(attempt int) (retry bool, diagnostics diag.Diagnostics),
+	onRetry func(attempt int, backoff time.Duration),
+	onContextDone func() diag.Diagnostics,
+) diag.Diagnostics {
+	diagnostics := diag.Diagnostics{}
+	backoff := initialRetryBackoffValue()
+	if backoff <= 0 {
+		backoff = time.Second
+	}
+
+	for attempt := 0; ; attempt++ {
+		retry, attemptDiagnostics := operation(attempt)
+		if !retry {
+			diagnostics.Append(attemptDiagnostics...)
+			return diagnostics
+		}
+
+		if onRetry != nil {
+			onRetry(attempt, backoff)
+		}
+
+		select {
+		case <-time.After(backoff):
+			backoff = nextBackoff(backoff)
+		case <-ctx.Done():
+			if onContextDone != nil {
+				diagnostics.Append(onContextDone()...)
 			}
 			return diagnostics
 		}
