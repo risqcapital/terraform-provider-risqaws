@@ -80,7 +80,9 @@ func (p *RisqAwsProvider) DataSources(ctx context.Context) []func() datasource.D
 }
 
 func (p *RisqAwsProvider) Functions(ctx context.Context) []func() function.Function {
-	return []func() function.Function{}
+	return []func() function.Function{
+		NewJSONEncodeFunction,
+	}
 }
 
 func New(version string) func() provider.Provider {
